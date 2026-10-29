@@ -1,0 +1,185 @@
+import logging
+import sqlite3
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+
+# Токен вашего бота
+TOKEN = "9283008629:AAGeYEXQQ9y3bS5DOwiOo3-f3yhO5kORefs"
+
+# Ваш Telegram ID (администратор)
+ADMIN_IDS = [265039056]
+
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+
+# Инициализация базы данных
+def init_db():
+    conn = sqlite3.connect('studio.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            full_name TEXT,
+            balance INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# Функция для получения пользователя или его регистрации
+def get_or_create_user(user_id, username, full_name):
+    conn = sqlite3.connect('studio.db')
+    cursor = conn.cursor()
+    cursor.execute('SELECT balance FROM users WHERE user_id = ?', (user_id,))
+    row = cursor.fetchone()
+    
+    if row is None:
+        cursor.execute(
+            'INSERT INTO users (user_id, username, full_name, balance) VALUES (?, ?, ?, 0)',
+            (user_id, username, full_name)
+        )
+        conn.commit()
+        balance = 0
+    else:
+        balance = row[0]
+        
+    conn.close()
+    return balance
+
+# Команда /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    balance = get_or_create_user(user.id, user.username, user.full_name)
+    
+    keyboard = [[KeyboardButton("💳 Проверить баланс")]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    
+    welcome_text = (
+        f"Здравствуйте, {user.first_name}!\n"
+        f"Добро пожаловать в студию ПравИло в Ташкенте.\n\n"
+        f"Ваш текущий баланс занятий: <b>{balance}</b>"
+    )
+    
+    await update.message.reply_text(welcome_text, parse_mode='HTML', reply_markup=reply_markup)
+
+# Проверка баланса по кнопке
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    user = update.effective_user
+    
+    if text == "💳 Проверить баланс":
+        balance = get_or_create_user(user.id, user.username, user.full_name)
+        await update.message.reply_text(f"📊 Остаток на вашем абонементе: <b>{balance}</b> зан.", parse_mode='HTML')
+
+# Команда добавления занятий администратором: /add ID КОЛИЧЕСТВО
+async def add_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
+        return
+        
+    try:
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("Ошибка! Использование: /add USER_ID КОЛИЧЕСТВО")
+            return
+            
+        target_id = int(args[0])
+        amount = int(args[1])
+        
+        conn = sqlite3.connect('studio.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (target_id,))
+        row = cursor.fetchone()
+        
+        if row is None:
+            cursor.execute('INSERT INTO users (user_id, balance) VALUES (?, ?)', (target_id, amount))
+            new_balance = amount
+        else:
+            new_balance = row[0] + amount
+            cursor.execute('UPDATE users SET balance = ? WHERE user_id = ?', (new_balance, target_id))
+            
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Успешно добавлено {amount} зан. пользователю {target_id}. Новый баланс: {new_balance}")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"🎉 Внимание! Ваш абонемент пополнен на <b>{amount}</b> зан. Баланс: <b>{new_balance}</b> зан.",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+            
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка при начислении: {e}")
+
+# Команда списания занятий администратором: /sub ID КОЛИЧЕСТВО
+async def sub_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("У вас нет прав для выполнения этой команды.")
+        return
+        
+    try:
+        args = context.args
+        if len(args) < 2:
+            await update.message.reply_text("Ошибка! Использование: /sub USER_ID КОЛИЧЕСТВО")
+            return
+            
+        target_id = int(args[0])
+        amount = int(args[1])
+        
+        conn = sqlite3.connect('studio.db')
+        cursor = conn.cursor()
+        cursor.execute('SELECT balance FROM users WHERE user_id = ?', (target_id,))
+        row = cursor.fetchone()
+        
+        if row is None:
+            await update.message.reply_text("Пользователь не найден в базе данных.")
+            conn.close()
+            return
+            
+        new_balance = max(0, row[0] - amount)
+        cursor.execute('UPDATE users SET balance = ? WHERE user_id = ?', (new_balance, target_id))
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(f"✅ Списано {amount} зан. у пользователя {target_id}. Остаток: {new_balance}")
+        
+        try:
+            await context.bot.send_message(
+                chat_id=target_id,
+                text=f"⚠️ С вашего абонемента списано <b>{amount}</b> зан. Остаток: <b>{new_balance}</b> зан.",
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+            
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_balance))
+    app.add_handler(CommandHandler("sub", sub_balance))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    print("Бот запущен...")
+    app.run_polling()
+
+if name == 'main':
